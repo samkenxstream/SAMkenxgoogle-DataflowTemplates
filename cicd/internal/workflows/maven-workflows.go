@@ -17,7 +17,6 @@
 package workflows
 
 import (
-	"flag"
 	"fmt"
 	"log"
 	"path/filepath"
@@ -61,7 +60,9 @@ type MavenFlags interface {
 	SkipIntegrationTests() string
 	FailAtTheEnd() string
 	RunIntegrationTests() string
+	RunLoadTests() string
 	ThreadCount(int) string
+	IntegrationTestParallelism(int) string
 }
 
 type mvnFlags struct{}
@@ -110,8 +111,16 @@ func (*mvnFlags) RunIntegrationTests() string {
 	return "-PtemplatesIntegrationTests"
 }
 
+func (*mvnFlags) RunLoadTests() string {
+	return "-PtemplatesLoadTests"
+}
+
 func (*mvnFlags) ThreadCount(count int) string {
 	return "-T" + strconv.Itoa(count)
+}
+
+func (*mvnFlags) IntegrationTestParallelism(count int) string {
+	return "-DitParallelism=" + strconv.Itoa(count)
 }
 
 func NewMavenFlags() MavenFlags {
@@ -169,9 +178,10 @@ func RunForChangedModules(cmd string, args ...string) error {
 
 	// We need to append the base dependency modules, because they are needed to build all
 	// other modules.
+	build_syndeo := false
 	for root, children := range repo.GetModulesForPaths(changed) {
 		if root == "syndeo-template" {
-			continue
+			build_syndeo = true
 		}
 		if len(children) == 0 {
 			modules = append(modules, root)
@@ -204,7 +214,35 @@ func RunForChangedModules(cmd string, args ...string) error {
 		log.Println("All modules were filtered out.")
 		return nil
 	}
+
+	has_it := false
+	has_common := false
+	has_v2 := false
+	for _, module := range modules {
+		if len(module) > 1 && module[:2] == "it" {
+			has_it = true
+		}
+		if module == "v2/common" {
+			has_common = true
+		}
+		if module == "v2" {
+			has_v2 = true
+		}
+	}
+	if has_it && !has_common {
+		modules = append(modules, "v2/common")
+	}
+	if has_v2 && !has_it {
+		modules = append(modules, "it")
+	}
+
 	modules = append(modules, "plugins/templates-maven-plugin")
+
+	if !build_syndeo {
+		args = append(args, "-P-oss-build")
+	} else {
+		args = append(args, "-Poss-build")
+	}
 
 	return op.RunMavenOnModule(unifiedPom, cmd, strings.Join(modules, ","), args...)
 }
@@ -216,26 +254,7 @@ func SpotlessCheck() Workflow {
 }
 
 func (*spotlessCheckWorkflow) Run(args ...string) error {
-	flags.RegisterCommonFlags()
-	flag.Parse()
-
-	changed := flags.ChangedFiles(javaFileRegex, markdownFileRegex)
-	if len(changed) == 0 {
-		return nil
-	}
-
-	modules := make([]string, 0)
-	for root, children := range repo.GetModulesForPaths(changed) {
-		if len(children) == 0 || (len(children) == 1 && children[0] == "") {
-			modules = append(modules, root)
-			continue
-		}
-		for _, c := range children {
-			modules = append(modules, fmt.Sprintf("%s/%s", root, c))
-		}
-	}
-
-	return op.RunMavenOnModule(unifiedPom, spotlessCheckCmd, strings.Join(modules, ","), args...)
+	return RunForChangedModules(spotlessCheckCmd, args...)
 }
 
 // Removes root and returns results. This may reorder the input.

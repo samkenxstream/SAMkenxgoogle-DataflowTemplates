@@ -15,33 +15,35 @@
  */
 package com.google.cloud.teleport.v2.templates;
 
-import static com.google.cloud.teleport.it.dataflow.DataflowUtils.createJobName;
-import static com.google.cloud.teleport.it.matchers.TemplateAsserts.assertThatRecords;
+import static com.google.cloud.teleport.it.common.matchers.TemplateAsserts.assertThatPipeline;
+import static com.google.cloud.teleport.it.common.matchers.TemplateAsserts.assertThatResult;
+import static com.google.cloud.teleport.it.gcp.bigquery.matchers.BigQueryAsserts.assertThatBigQueryRecords;
 import static com.google.common.truth.Truth.assertThat;
 
 import com.google.cloud.bigquery.Field;
 import com.google.cloud.bigquery.Schema;
 import com.google.cloud.bigquery.StandardSQLTypeName;
+import com.google.cloud.bigquery.TableId;
 import com.google.cloud.bigquery.TableResult;
-import com.google.cloud.teleport.it.TemplateTestBase;
-import com.google.cloud.teleport.it.bigquery.BigQueryResourceManager;
-import com.google.cloud.teleport.it.bigquery.DefaultBigQueryResourceManager;
-import com.google.cloud.teleport.it.dataflow.DataflowClient.JobInfo;
-import com.google.cloud.teleport.it.dataflow.DataflowClient.JobState;
-import com.google.cloud.teleport.it.dataflow.DataflowClient.LaunchConfig;
-import com.google.cloud.teleport.it.dataflow.DataflowOperator;
-import com.google.cloud.teleport.it.dataflow.DataflowOperator.Result;
-import com.google.cloud.teleport.it.pubsub.DefaultPubsubResourceManager;
-import com.google.cloud.teleport.it.pubsub.PubsubResourceManager;
+import com.google.cloud.teleport.it.common.PipelineLauncher.LaunchConfig;
+import com.google.cloud.teleport.it.common.PipelineLauncher.LaunchInfo;
+import com.google.cloud.teleport.it.common.PipelineOperator.Result;
+import com.google.cloud.teleport.it.common.utils.ResourceManagerUtils;
+import com.google.cloud.teleport.it.gcp.TemplateTestBase;
+import com.google.cloud.teleport.it.gcp.bigquery.BigQueryResourceManager;
+import com.google.cloud.teleport.it.gcp.bigquery.DefaultBigQueryResourceManager;
+import com.google.cloud.teleport.it.gcp.bigquery.conditions.BigQueryRowsCheck;
+import com.google.cloud.teleport.it.gcp.pubsub.DefaultPubsubResourceManager;
+import com.google.cloud.teleport.it.gcp.pubsub.PubsubResourceManager;
 import com.google.cloud.teleport.metadata.TemplateIntegrationTest;
 import com.google.common.collect.ImmutableMap;
 import com.google.protobuf.ByteString;
+import com.google.pubsub.v1.SubscriptionName;
 import com.google.pubsub.v1.TopicName;
 import java.io.IOException;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 import org.json.JSONObject;
 import org.junit.After;
@@ -51,91 +53,122 @@ import org.junit.experimental.categories.Category;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
 
-/** Integration test for {@link PubSubToBigQuery} flex template. */
+/** Integration test for {@link PubSubToBigQuery} Flex template. */
 @Category(TemplateIntegrationTest.class)
-@TemplateIntegrationTest(value = PubSubToBigQuery.class, template = "PubSub_to_BigQuery")
+@TemplateIntegrationTest(PubSubToBigQuery.class)
 @RunWith(JUnit4.class)
 public final class PubSubToBigQueryIT extends TemplateTestBase {
 
-  private static PubsubResourceManager pubsubResourceManager;
-  private static BigQueryResourceManager bigQueryResourceManager;
+  private PubsubResourceManager pubsubResourceManager;
+  private BigQueryResourceManager bigQueryResourceManager;
+
+  private static final int MESSAGES_COUNT = 10;
+  private static final int BAD_MESSAGES_COUNT = 3;
 
   @Before
   public void setUp() throws IOException {
     pubsubResourceManager =
-        DefaultPubsubResourceManager.builder(testName.getMethodName(), PROJECT)
+        DefaultPubsubResourceManager.builder(testName, PROJECT)
             .credentialsProvider(credentialsProvider)
             .build();
     bigQueryResourceManager =
-        DefaultBigQueryResourceManager.builder(testName.getMethodName(), PROJECT)
+        DefaultBigQueryResourceManager.builder(testName, PROJECT)
             .setCredentials(credentials)
             .build();
+
+    gcsClient.createArtifact(
+        "udf.js",
+        "function uppercaseName(value) {\n"
+            + "  const data = JSON.parse(value);\n"
+            + "  data.name = data.name.toUpperCase();\n"
+            + "  return JSON.stringify(data);\n"
+            + "}");
   }
 
   @After
   public void cleanUp() {
-    pubsubResourceManager.cleanupAll();
-    bigQueryResourceManager.cleanupAll();
+    ResourceManagerUtils.cleanResources(pubsubResourceManager, bigQueryResourceManager);
   }
 
   @Test
-  public void testTopicToBigQuery() throws IOException {
-    testTextToBigQuery(Function.identity()); // no extra parameters
+  public void testPubsubToBigQuery() throws IOException {
+    basePubsubToBigQuery(Function.identity()); // no extra parameters
   }
 
   @Test
-  public void testTopicToBigQueryWithStorageApi() throws IOException {
-    testTextToBigQuery(
+  public void testPubsubToBigQueryWithStorageApi() throws IOException {
+    basePubsubToBigQuery(
         b ->
             b.addParameter("useStorageWriteApi", "true")
                 .addParameter("numStorageWriteApiStreams", "1")
                 .addParameter("storageWriteApiTriggeringFrequencySec", "5"));
   }
 
-  private void testTextToBigQuery(Function<LaunchConfig.Builder, LaunchConfig.Builder> paramsAdder)
-      throws IOException {
+  private void basePubsubToBigQuery(
+      Function<LaunchConfig.Builder, LaunchConfig.Builder> paramsAdder) throws IOException {
     // Arrange
-    String jobName = createJobName(testName.getMethodName());
-    String bqTable = testName.getMethodName();
-    Map<String, Object> message = Map.of("job", jobName, "msg", "message");
     List<Field> bqSchemaFields =
         Arrays.asList(
+            Field.of("id", StandardSQLTypeName.INT64),
             Field.of("job", StandardSQLTypeName.STRING),
-            Field.of("msg", StandardSQLTypeName.STRING));
+            Field.of("name", StandardSQLTypeName.STRING));
     Schema bqSchema = Schema.of(bqSchemaFields);
 
     TopicName topic = pubsubResourceManager.createTopic("input");
     bigQueryResourceManager.createDataset(REGION);
-    bigQueryResourceManager.createTable(bqTable, bqSchema);
-    String tableSpec = PROJECT + ":" + bigQueryResourceManager.getDatasetId() + "." + bqTable;
+    SubscriptionName subscription = pubsubResourceManager.createSubscription(topic, "sub-1");
+    TableId table = bigQueryResourceManager.createTable(testName, bqSchema);
+    TableId dlqTable =
+        TableId.of(
+            PROJECT,
+            table.getDataset(),
+            table.getTable() + PubSubToBigQuery.DEFAULT_DEADLETTER_TABLE_SUFFIX);
 
     LaunchConfig.Builder options =
         paramsAdder.apply(
-            LaunchConfig.builder(jobName, specPath)
-                .addParameter("inputTopic", topic.toString())
-                .addParameter("outputTableSpec", tableSpec));
+            LaunchConfig.builder(testName, specPath)
+                .addParameter("inputSubscription", subscription.toString())
+                .addParameter("outputTableSpec", toTableSpecLegacy(table))
+                .addParameter("javascriptTextTransformGcsPath", getGcsPath("udf.js"))
+                .addParameter("javascriptTextTransformFunctionName", "uppercaseName"));
 
     // Act
-    JobInfo info = launchTemplate(options);
-    assertThat(info.state()).isIn(JobState.ACTIVE_STATES);
+    LaunchInfo info = launchTemplate(options);
+    assertThatPipeline(info).isRunning();
 
-    AtomicReference<TableResult> records = new AtomicReference<>();
+    for (int i = 1; i <= MESSAGES_COUNT; i++) {
+      Map<String, Object> message = Map.of("id", i, "job", testName, "name", "message");
+      ByteString messageData = ByteString.copyFromUtf8(new JSONObject(message).toString());
+      pubsubResourceManager.publish(topic, ImmutableMap.of(), messageData);
+    }
+
+    for (int i = 1; i <= BAD_MESSAGES_COUNT; i++) {
+      ByteString messageData = ByteString.copyFromUtf8("bad id " + i);
+      pubsubResourceManager.publish(topic, ImmutableMap.of(), messageData);
+    }
+
     Result result =
-        new DataflowOperator(getDataflowClient())
-            .waitForConditionAndFinish(
+        pipelineOperator()
+            .waitForConditionsAndFinish(
                 createConfig(info),
-                () -> {
-                  ByteString messageData =
-                      ByteString.copyFromUtf8(new JSONObject(message).toString());
-                  pubsubResourceManager.publish(topic, ImmutableMap.of(), messageData);
-
-                  TableResult values = bigQueryResourceManager.readTable(bqTable);
-                  records.set(values);
-                  return values.getTotalRows() != 0;
-                });
+                BigQueryRowsCheck.builder(bigQueryResourceManager, table)
+                    .setMinRows(MESSAGES_COUNT)
+                    .build(),
+                BigQueryRowsCheck.builder(bigQueryResourceManager, dlqTable)
+                    .setMinRows(BAD_MESSAGES_COUNT)
+                    .build());
 
     // Assert
-    assertThat(result).isEqualTo(Result.CONDITION_MET);
-    assertThatRecords(records.get()).allMatch(message);
+    assertThatResult(result).meetsConditions();
+
+    TableResult records = bigQueryResourceManager.readTable(table);
+
+    // Make sure record can be read and UDF changed name to uppercase
+    assertThatBigQueryRecords(records)
+        .hasRecordsUnordered(List.of(Map.of("id", 1, "job", testName, "name", "MESSAGE")));
+
+    TableResult dlqRecords = bigQueryResourceManager.readTable(dlqTable);
+    assertThat(dlqRecords.getValues().iterator().next().toString())
+        .contains("Expected json literal but found");
   }
 }

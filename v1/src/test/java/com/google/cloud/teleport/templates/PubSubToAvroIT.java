@@ -15,19 +15,20 @@
  */
 package com.google.cloud.teleport.templates;
 
-import static com.google.cloud.teleport.it.dataflow.DataflowUtils.createJobName;
+import static com.google.cloud.teleport.it.common.matchers.TemplateAsserts.assertThatPipeline;
+import static com.google.cloud.teleport.it.common.matchers.TemplateAsserts.assertThatResult;
 import static com.google.common.truth.Truth.assertThat;
 
 import com.google.cloud.teleport.avro.AvroPubsubMessageRecord;
-import com.google.cloud.teleport.it.TemplateTestBase;
-import com.google.cloud.teleport.it.artifacts.Artifact;
-import com.google.cloud.teleport.it.dataflow.DataflowClient.JobInfo;
-import com.google.cloud.teleport.it.dataflow.DataflowClient.JobState;
-import com.google.cloud.teleport.it.dataflow.DataflowClient.LaunchConfig;
-import com.google.cloud.teleport.it.dataflow.DataflowOperator;
-import com.google.cloud.teleport.it.dataflow.DataflowOperator.Result;
-import com.google.cloud.teleport.it.pubsub.DefaultPubsubResourceManager;
-import com.google.cloud.teleport.it.pubsub.PubsubResourceManager;
+import com.google.cloud.teleport.it.common.PipelineLauncher.LaunchConfig;
+import com.google.cloud.teleport.it.common.PipelineLauncher.LaunchInfo;
+import com.google.cloud.teleport.it.common.PipelineOperator.Result;
+import com.google.cloud.teleport.it.common.utils.ResourceManagerUtils;
+import com.google.cloud.teleport.it.gcp.TemplateTestBase;
+import com.google.cloud.teleport.it.gcp.artifacts.Artifact;
+import com.google.cloud.teleport.it.gcp.pubsub.DefaultPubsubResourceManager;
+import com.google.cloud.teleport.it.gcp.pubsub.PubsubResourceManager;
+import com.google.cloud.teleport.metadata.SkipDirectRunnerTest;
 import com.google.cloud.teleport.metadata.TemplateIntegrationTest;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
@@ -52,61 +53,67 @@ import org.junit.experimental.categories.Category;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
 
-/** Integration test for {@link PubsubToAvro} PubSub Subscription to Bigquery. */
-@Category(TemplateIntegrationTest.class)
+/** Integration test for {@link PubsubToAvro} PubSub to Avro. */
+// SkipDirectRunnerTest: PubsubIO doesn't trigger panes on the DirectRunner.
+@Category({TemplateIntegrationTest.class, SkipDirectRunnerTest.class})
 @TemplateIntegrationTest(value = PubsubToAvro.class, template = "Cloud_PubSub_to_Avro")
 @RunWith(JUnit4.class)
 public class PubSubToAvroIT extends TemplateTestBase {
-  private static PubsubResourceManager pubsubResourceManager;
+  private PubsubResourceManager pubsubResourceManager;
 
   @Before
   public void setUp() throws IOException {
     pubsubResourceManager =
-        DefaultPubsubResourceManager.builder(testName.getMethodName(), PROJECT)
+        DefaultPubsubResourceManager.builder(testName, PROJECT)
             .credentialsProvider(credentialsProvider)
             .build();
   }
 
   @After
   public void tearDown() {
-    pubsubResourceManager.cleanupAll();
+    ResourceManagerUtils.cleanResources(pubsubResourceManager);
   }
 
   @Test
   public void testTopicToAvro() throws IOException {
     // Arrange
-    String name = testName.getMethodName();
-    String jobName = createJobName(name);
+    String name = testName;
     Pattern expectedFilePattern = Pattern.compile(".*topic-output-.*");
     TopicName topic = pubsubResourceManager.createTopic("input-topic");
 
     // Act
-    JobInfo info =
+    LaunchInfo info =
         launchTemplate(
-            LaunchConfig.builder(jobName, specPath)
+            LaunchConfig.builder(testName, specPath)
                 .addParameter("inputTopic", topic.toString())
-                .addParameter("outputDirectory", getGcsPath(name))
+                .addParameter("outputDirectory", getGcsPath(testName))
                 .addParameter("avroTempDirectory", getGcsPath("avro_tmp"))
                 .addParameter("outputFilenamePrefix", "topic-output-"));
-    assertThat(info.state()).isIn(JobState.ACTIVE_STATES);
+    assertThatPipeline(info).isRunning();
 
     ImmutableSet<String> messages =
-        ImmutableSet.of("message1-" + jobName, "message2-" + jobName, "message3-" + jobName);
-    messages.forEach(
-        m -> pubsubResourceManager.publish(topic, ImmutableMap.of(), ByteString.copyFromUtf8(m)));
+        ImmutableSet.of("message1-" + name, "message2-" + name, "message3-" + name);
 
     AtomicReference<List<Artifact>> artifacts = new AtomicReference<>();
     Result result =
-        new DataflowOperator(getDataflowClient())
+        pipelineOperator()
             .waitForConditionAndFinish(
                 createConfig(info),
                 () -> {
-                  artifacts.set(artifactClient.listArtifacts(name, expectedFilePattern));
+
+                  // For tests that run against topics, sending repeatedly will make it work for
+                  // cases in which the on-demand subscription is created after sending messages.
+                  for (String message : messages) {
+                    pubsubResourceManager.publish(
+                        topic, ImmutableMap.of(), ByteString.copyFromUtf8(message));
+                  }
+
+                  artifacts.set(gcsClient.listArtifacts(testName, expectedFilePattern));
                   return !artifacts.get().isEmpty();
                 });
 
     // Assert
-    assertThat(result).isEqualTo(Result.CONDITION_MET);
+    assertThatResult(result).meetsConditions();
     assertThat(
             artifacts.get().stream()
                 .flatMap(a -> deserialize(a.contents()))

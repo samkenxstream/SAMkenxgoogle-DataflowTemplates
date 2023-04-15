@@ -24,18 +24,15 @@
   </parent>
 
   <artifactId>integration-testing-lib</artifactId>
+  <packaging>pom</packaging>
   <modelVersion>4.0.0</modelVersion>
 
   <properties>
-    <cloud-storage.version>2.2.2</cloud-storage.version>
-    <elasticsearch.version>7.9.2</elasticsearch.version>
-    <guava.version>31.0.1-jre</guava.version>
-    <kafka.version>2.4.1</kafka.version>
-    <mockito.version>3.7.7</mockito.version>
-    <mockito-inline.version>4.5.1</mockito-inline.version>
-    <mongodb.version>3.12.10</mongodb.version>
-    <dataflow-api.version>v1b3-rev20220920-2.0.0</dataflow-api.version>
+    <commons-math3.version>3.6.1</commons-math3.version>
+    <failsafe.version>3.3.0</failsafe.version>
     <testcontainers.version>1.17.5</testcontainers.version>
+
+    <licenseHeaderFile>../JAVA_LICENSE_HEADER</licenseHeaderFile>
   </properties>
 
   <dependencies>
@@ -45,40 +42,6 @@
       <artifactId>metadata</artifactId>
       <version>${project.version}</version>
     </dependency>
-    <!-- Beam. Try to minimize Beam dependencies, since this is about testing
-      pipelines, not writing them. -->
-    <dependency>
-      <groupId>com.google.apis</groupId>
-      <artifactId>google-api-services-dataflow</artifactId>
-      <version>${dataflow-api.version}</version>
-    </dependency>
-
-    <!-- Google Cloud -->
-    <dependency>
-      <groupId>com.google.cloud</groupId>
-      <artifactId>google-cloud-storage</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>com.google.cloud</groupId>
-      <artifactId>google-cloud-bigquery</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>com.google.cloud</groupId>
-      <artifactId>google-cloud-monitoring</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>com.google.cloud</groupId>
-      <artifactId>google-cloud-bigtable</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>com.google.cloud</groupId>
-      <artifactId>google-cloud-spanner</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>com.google.cloud</groupId>
-      <artifactId>google-cloud-pubsub</artifactId>
-    </dependency>
-
     <dependency>
       <groupId>com.google.auto.value</groupId>
       <artifactId>auto-value</artifactId>
@@ -105,56 +68,43 @@
       <artifactId>slf4j-simple</artifactId>
       <version>${slf4j.version}</version>
     </dependency>
-
-    <!-- Apache Beam dependency -->
+    <!-- transitive dependencies need to pin version -->
     <dependency>
-      <groupId>org.apache.beam</groupId>
-      <artifactId>beam-sdks-java-core</artifactId>
-    </dependency>
-
-    <!-- Test Containers -->
-    <dependency>
-      <groupId>org.testcontainers</groupId>
-      <artifactId>testcontainers</artifactId>
-      <version>${testcontainers.version}</version>
+      <groupId>org.apache.commons</groupId>
+      <artifactId>commons-math3</artifactId>
+      <version>${commons-math3.version}</version>
     </dependency>
     <dependency>
-      <groupId>org.testcontainers</groupId>
-      <artifactId>mongodb</artifactId>
-      <version>${testcontainers.version}</version>
-    </dependency>
-    <dependency>
-      <groupId>org.testcontainers</groupId>
-      <artifactId>kafka</artifactId>
-      <version>${testcontainers.version}</version>
-    </dependency>
-    <dependency>
-      <groupId>org.testcontainers</groupId>
-      <artifactId>elasticsearch</artifactId>
-      <version>${testcontainers.version}</version>
-    </dependency>
-
-    <!-- Third-party drivers -->
-    <dependency>
-      <groupId>org.mongodb</groupId>
-      <artifactId>mongodb-driver-sync</artifactId>
-      <version>${mongodb.version}</version>
+      <groupId>org.apache.hadoop</groupId>
+      <artifactId>hadoop-common</artifactId>
+      <version>${hadoop.version}</version>
       <exclusions>
         <exclusion>
-          <groupId>org.mongodb</groupId>
-          <artifactId>bson-record-codec</artifactId>
+          <groupId>org.codehaus.jackson</groupId>
+          <artifactId>*</artifactId>
+        </exclusion>
+        <exclusion>
+          <groupId>org.slf4j</groupId>
+          <artifactId>*</artifactId>
+        </exclusion>
+        <exclusion>
+          <groupId>log4j</groupId>
+          <artifactId>*</artifactId>
+        </exclusion>
+        <exclusion>
+          <groupId>com.sun.jersey</groupId>
+          <artifactId>*</artifactId>
+        </exclusion>
+        <exclusion>
+          <groupId>org.apache.common3</groupId>
+          <artifactId>commons-math3</artifactId>
         </exclusion>
       </exclusions>
     </dependency>
     <dependency>
-      <groupId>org.apache.kafka</groupId>
-      <artifactId>kafka-clients</artifactId>
-      <version>${kafka.version}</version>
-    </dependency>
-    <dependency>
-      <groupId>org.elasticsearch.client</groupId>
-      <artifactId>elasticsearch-rest-high-level-client</artifactId>
-      <version>${elasticsearch.version}</version>
+      <groupId>dev.failsafe</groupId>
+      <artifactId>failsafe</artifactId>
+      <version>${failsafe.version}</version>
     </dependency>
 
     <!-- Testing -->
@@ -177,7 +127,7 @@
     <dependency>
       <groupId>org.mockito</groupId>
       <artifactId>mockito-inline</artifactId>
-      <version>${mockito-inline.version}</version>
+      <version>${mockito.version}</version>
       <scope>test</scope>
     </dependency>
   </dependencies>
@@ -200,4 +150,34 @@
     </plugins>
   </build>
 
+  <!-- Skip tests for this common module when profile enabled -->
+  <profiles>
+    <profile>
+      <id>skipCommonTests</id>
+      <activation>
+        <activeByDefault>false</activeByDefault>
+      </activation>
+      <properties>
+        <skipTests>true</skipTests>
+      </properties>
+    </profile>
+    <profile>
+      <id>skipIT</id>
+      <activation>
+        <activeByDefault>false</activeByDefault>
+      </activation>
+      <properties>
+        <skipTests>true</skipTests>
+      </properties>
+    </profile>
+  </profiles>
+  <modules>
+    <module>common</module>
+    <module>cassandra</module>
+    <module>elasticsearch</module>
+    <module>google-cloud-platform</module>
+    <module>jdbc</module>
+    <module>kafka</module>
+    <module>mongodb</module>
+  </modules>
 </project>

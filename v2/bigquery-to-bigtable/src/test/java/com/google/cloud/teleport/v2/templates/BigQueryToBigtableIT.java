@@ -15,194 +15,173 @@
  */
 package com.google.cloud.teleport.v2.templates;
 
-import static com.google.cloud.teleport.it.dataflow.DataflowUtils.createJobName;
-import static com.google.common.truth.Truth.assertThat;
-import static org.junit.Assert.assertEquals;
+import static com.google.cloud.teleport.it.common.TestProperties.getProperty;
+import static com.google.cloud.teleport.it.common.matchers.TemplateAsserts.assertThatPipeline;
+import static com.google.cloud.teleport.it.common.matchers.TemplateAsserts.assertThatResult;
+import static com.google.cloud.teleport.it.gcp.bigquery.matchers.BigQueryAsserts.bigQueryRowsToRecords;
+import static com.google.cloud.teleport.it.gcp.bigtable.matchers.BigtableAsserts.assertThatBigtableRecords;
 
 import com.google.cloud.Tuple;
-import com.google.cloud.bigquery.Field;
 import com.google.cloud.bigquery.InsertAllRequest.RowToInsert;
 import com.google.cloud.bigquery.Schema;
-import com.google.cloud.bigquery.StandardSQLTypeName;
+import com.google.cloud.bigquery.TableId;
 import com.google.cloud.bigtable.data.v2.models.Row;
-import com.google.cloud.teleport.it.TemplateTestBase;
-import com.google.cloud.teleport.it.TestProperties;
-import com.google.cloud.teleport.it.bigquery.BigQueryResourceManager;
-import com.google.cloud.teleport.it.bigquery.DefaultBigQueryResourceManager;
-import com.google.cloud.teleport.it.bigtable.DefaultBigtableResourceManager;
-import com.google.cloud.teleport.it.dataflow.DataflowClient;
-import com.google.cloud.teleport.it.dataflow.DataflowOperator;
+import com.google.cloud.teleport.it.common.PipelineLauncher;
+import com.google.cloud.teleport.it.common.PipelineLauncher.LaunchInfo;
+import com.google.cloud.teleport.it.common.PipelineOperator;
+import com.google.cloud.teleport.it.common.TestProperties;
+import com.google.cloud.teleport.it.common.utils.ResourceManagerUtils;
+import com.google.cloud.teleport.it.gcp.TemplateTestBase;
+import com.google.cloud.teleport.it.gcp.bigquery.BigQueryResourceManager;
+import com.google.cloud.teleport.it.gcp.bigquery.DefaultBigQueryResourceManager;
+import com.google.cloud.teleport.it.gcp.bigquery.utils.BigQueryTestUtil;
+import com.google.cloud.teleport.it.gcp.bigtable.DefaultBigtableResourceManager;
 import com.google.cloud.teleport.metadata.TemplateIntegrationTest;
 import com.google.common.collect.ImmutableList;
+import com.google.common.truth.Truth;
 import java.io.IOException;
-import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 import org.junit.After;
 import org.junit.Before;
-import org.junit.Rule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
-import org.junit.rules.TestName;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
-import org.testcontainers.shaded.org.apache.commons.lang3.RandomStringUtils;
 
 /** Integration test for {@link BigQueryToBigtable} (BigQuery_To_Bigtable). */
 @Category(TemplateIntegrationTest.class)
 @TemplateIntegrationTest(BigQueryToBigtable.class)
 @RunWith(JUnit4.class)
 public class BigQueryToBigtableIT extends TemplateTestBase {
-  @Rule public final TestName testName = new TestName();
 
-  private static final String READ_QUERY = "readQuery";
+  private static final String READ_QUERY = "query";
+  private static final String READ_TABLE_SPEC = "inputTableSpec";
+  private static final String USE_LEGACY_SQL = "useLegacySql";
   private static final String READ_ID_COL = "readIdColumn";
-  private static final String WRITE_PROJECT_ID = "bigtableWriteProjectId";
   private static final String WRITE_INSTANCE_ID = "bigtableWriteInstanceId";
   private static final String WRITE_TABLE_ID = "bigtableWriteTableId";
   private static final String WRITE_COL_FAMILY = "bigtableWriteColumnFamily";
-  private static final String WRITE_APP_PROFILE = "bigtableWriteAppProfile";
 
+  // Define a set of parameters used to allow configuration of the test size being run.
   private static final String BIGQUERY_ID_COL = "test_id";
+  private static final int BIGQUERY_NUM_ROWS =
+      Integer.parseInt(getProperty("numRows", "20", TestProperties.Type.PROPERTY));
+  private static final int BIGQUERY_NUM_FIELDS =
+      Integer.parseInt(getProperty("numFields", "100", TestProperties.Type.PROPERTY));
+  private static final int BIGQUERY_MAX_ENTRY_LENGTH =
+      Integer.min(
+          300, Integer.parseInt(getProperty("maxEntryLength", "20", TestProperties.Type.PROPERTY)));
 
-  private static BigQueryResourceManager bigQueryClient;
-  private static DefaultBigtableResourceManager bigtableClient;
+  private BigQueryResourceManager bigQueryClient;
+  private DefaultBigtableResourceManager bigtableClient;
 
   @Before
   public void setup() throws IOException {
     bigQueryClient =
-        DefaultBigQueryResourceManager.builder(testName.getMethodName(), PROJECT)
+        DefaultBigQueryResourceManager.builder(testName, PROJECT)
             .setCredentials(credentials)
             .build();
     bigtableClient =
-        DefaultBigtableResourceManager.builder(testName.getMethodName(), PROJECT)
+        DefaultBigtableResourceManager.builder(testName, PROJECT)
             .setCredentialsProvider(credentialsProvider)
             .build();
   }
 
   @After
-  public void tearDownClass() {
-    if (bigtableClient != null) {
-      bigtableClient.cleanupAll();
-    }
-    if (bigQueryClient != null) {
-      bigQueryClient.cleanupAll();
-    }
+  public void tearDown() {
+    ResourceManagerUtils.cleanResources(bigtableClient, bigQueryClient);
   }
 
-  @Test
-  public void testBigQueryToBigtable() throws IOException {
+  private void simpleBigQueryToBigtableTest(PipelineLauncher.LaunchConfig.Builder options)
+      throws IOException {
     // Arrange
-    String jobName = createJobName(testName.getMethodName());
-    String tableName = "test_table";
-
-    Tuple<Schema, List<RowToInsert>> generatedTable = generateBigQueryTable();
+    String tableName = options.getParameter(WRITE_TABLE_ID);
+    Tuple<Schema, List<RowToInsert>> generatedTable =
+        BigQueryTestUtil.generateBigQueryTable(
+            BIGQUERY_ID_COL, BIGQUERY_NUM_ROWS, BIGQUERY_NUM_FIELDS, BIGQUERY_MAX_ENTRY_LENGTH);
     Schema bigQuerySchema = generatedTable.x();
     List<RowToInsert> bigQueryRows = generatedTable.y();
     bigQueryClient.createTable(tableName, bigQuerySchema);
     bigQueryClient.write(tableName, bigQueryRows);
 
-    String colFamily = "names";
+    String colFamily = options.getParameter(WRITE_COL_FAMILY);
+    Truth.assertThat(colFamily).isNotNull();
     bigtableClient.createTable(tableName, ImmutableList.of(colFamily));
 
-    DataflowClient.LaunchConfig.Builder options =
-        DataflowClient.LaunchConfig.builder(jobName, specPath)
+    // Act
+    LaunchInfo info = launchTemplate(options);
+    assertThatPipeline(info).isRunning();
+
+    PipelineOperator.Result result = pipelineOperator().waitUntilDone(createConfig(info));
+
+    // Assert
+    assertThatResult(result).isLaunchFinished();
+
+    List<Row> rows = bigtableClient.readTable(tableName);
+    assertThatBigtableRecords(rows, colFamily)
+        .hasRecordsUnordered(
+            bigQueryRowsToRecords(bigQueryRows, ImmutableList.of(BIGQUERY_ID_COL)));
+  }
+
+  @Test
+  public void testBigQueryToBigtableWithQuery() throws IOException {
+    String tableName = "test_table";
+    String colFamily = "names";
+
+    PipelineLauncher.LaunchConfig.Builder options =
+        PipelineLauncher.LaunchConfig.builder(testName, specPath)
             .addParameter(
                 READ_QUERY,
                 "SELECT * FROM `"
-                    + String.join(".", PROJECT, bigQueryClient.getDatasetId(), tableName)
+                    + toTableSpecStandard(
+                        TableId.of(PROJECT, bigQueryClient.getDatasetId(), tableName))
                     + "`")
             .addParameter(READ_ID_COL, BIGQUERY_ID_COL)
-            .addParameter(WRITE_PROJECT_ID, PROJECT)
             .addParameter(WRITE_INSTANCE_ID, bigtableClient.getInstanceId())
-            .addParameter(WRITE_APP_PROFILE, "default")
             .addParameter(WRITE_TABLE_ID, tableName)
             .addParameter(WRITE_COL_FAMILY, colFamily);
 
-    // Act
-    DataflowClient.JobInfo info = launchTemplate(options);
-    assertThat(info.state()).isIn(DataflowClient.JobState.ACTIVE_STATES);
-
-    DataflowOperator.Result result =
-        new DataflowOperator(getDataflowClient()).waitUntilDone(createConfig(info));
-
-    // Assert
-    assertThat(result).isEqualTo(DataflowOperator.Result.JOB_FINISHED);
-
-    List<Row> rows = bigtableClient.readTable(tableName);
-    rows.forEach(
-        row -> {
-          row.getCells(colFamily)
-              .forEach(
-                  rowCell -> {
-                    RowToInsert bqRow =
-                        bigQueryRows.get(Integer.parseInt(row.getKey().toStringUtf8()));
-                    String col = rowCell.getQualifier().toStringUtf8();
-                    String val = rowCell.getValue().toStringUtf8();
-
-                    assertEquals(rowCell.getFamily(), colFamily);
-                    assertEquals(bqRow.getContent().get(col), val);
-                  });
-        });
+    simpleBigQueryToBigtableTest(options);
   }
 
-  private static Tuple<Schema, List<RowToInsert>> generateBigQueryTable() {
-    // Grab user parameters for table dimensions, or use defaults
-    // *note* maxEntryLength cannot exceed 300 characters
-    int numRows =
-        Integer.parseInt(TestProperties.getProperty("numRows", "20", TestProperties.Type.PROPERTY));
-    int numFields =
-        Integer.parseInt(
-            TestProperties.getProperty("numFields", "100", TestProperties.Type.PROPERTY));
-    int maxEntryLength =
-        Math.max(
-            300,
-            Integer.parseInt(
-                TestProperties.getProperty("maxEntryLength", "20", TestProperties.Type.PROPERTY)));
+  @Test
+  public void testBigQueryToBigtableWithLegacyQuery() throws IOException {
+    String tableName = "test_table";
+    String colFamily = "names";
 
-    // List to store BigQuery schema fields
-    List<Field> bqSchemaFields = new ArrayList<>();
+    PipelineLauncher.LaunchConfig.Builder options =
+        PipelineLauncher.LaunchConfig.builder(testName, specPath)
+            .addParameter(
+                READ_QUERY,
+                "SELECT * FROM ["
+                    + toTableSpecLegacy(
+                        TableId.of(PROJECT, bigQueryClient.getDatasetId(), tableName))
+                    + "]")
+            .addParameter(USE_LEGACY_SQL, "true")
+            .addParameter(READ_ID_COL, BIGQUERY_ID_COL)
+            .addParameter(WRITE_INSTANCE_ID, bigtableClient.getInstanceId())
+            .addParameter(WRITE_TABLE_ID, tableName)
+            .addParameter(WRITE_COL_FAMILY, colFamily);
+    toTableSpecLegacy(TableId.of(PROJECT, bigQueryClient.getDatasetId(), tableName));
 
-    // Add unique identifier field
-    bqSchemaFields.add(Field.of(BIGQUERY_ID_COL, StandardSQLTypeName.INT64));
+    simpleBigQueryToBigtableTest(options);
+  }
 
-    // Generate random fields
-    for (int i = 1; i < numFields; i++) {
-      StringBuilder randomField = new StringBuilder();
+  @Test
+  public void testBigQueryToBigtableWithTableSpec() throws IOException {
+    String tableName = "test_table";
+    String colFamily = "names";
 
-      // Field must start with letter
-      String prependLetter = RandomStringUtils.randomAlphabetic(1);
-      // Field uses unique number at end to keep name unique
-      String appendNum = String.valueOf(i);
-      // Remaining field name is generated randomly within bounds of maxEntryLength
-      String randomString =
-          RandomStringUtils.randomAlphanumeric(0, maxEntryLength - appendNum.length());
+    PipelineLauncher.LaunchConfig.Builder options =
+        PipelineLauncher.LaunchConfig.builder(testName, specPath)
+            .addParameter(
+                READ_TABLE_SPEC,
+                toTableSpecLegacy(TableId.of(PROJECT, bigQueryClient.getDatasetId(), tableName)))
+            .addParameter(READ_ID_COL, BIGQUERY_ID_COL)
+            .addParameter(WRITE_INSTANCE_ID, bigtableClient.getInstanceId())
+            .addParameter(WRITE_TABLE_ID, tableName)
+            .addParameter(WRITE_COL_FAMILY, colFamily);
 
-      randomField.append(prependLetter).append(randomString).append(appendNum);
-      bqSchemaFields.add(Field.of(randomField.toString(), StandardSQLTypeName.STRING));
-    }
-    // Create schema and BigQuery table
-    Schema schema = Schema.of(bqSchemaFields);
-
-    // Generate random data
-    List<RowToInsert> bigQueryRows = new ArrayList<>();
-    for (int i = 0; i < numRows; i++) {
-      Map<String, Object> content = new HashMap<>();
-
-      // Iterate unique identifier column
-      content.put(BIGQUERY_ID_COL, i);
-
-      // Generate remaining cells in row
-      for (int j = 1; j < numFields; j++) {
-        content.put(
-            bqSchemaFields.get(j).getName(),
-            RandomStringUtils.randomAlphanumeric(1, maxEntryLength));
-      }
-      bigQueryRows.add(RowToInsert.of(content));
-    }
-
-    // Return tuple containing the randomly generated schema and table data
-    return Tuple.of(schema, bigQueryRows);
+    simpleBigQueryToBigtableTest(options);
   }
 }
