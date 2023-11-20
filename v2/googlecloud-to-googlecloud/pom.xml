@@ -30,7 +30,7 @@
 
   <properties>
     <dataplex.api.version>v1-rev20230308-2.0.0</dataplex.api.version>
-    <derby.version>10.14.2.0</derby.version>
+    <derby.version>10.17.1.0</derby.version>
     <dlp.version>2.1.0</dlp.version>
   </properties>
 
