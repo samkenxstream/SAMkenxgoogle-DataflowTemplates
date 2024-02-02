@@ -51,7 +51,7 @@
     <derby.version>10.14.2.0</derby.version>
     <kafka.clients.version>1.0.0</kafka.clients.version>
     <threetenbp.version>1.4.4</threetenbp.version>
-    <spring.version>5.2.22.RELEASE</spring.version>
+    <spring.version>5.2.23.RELEASE</spring.version>
     <tensorflow.version>1.15.0</tensorflow.version>
     <dlp.version>2.1.0</dlp.version>
     <hbase.version>1.4.5</hbase.version>
